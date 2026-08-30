@@ -17,7 +17,7 @@ Output:
     <edit>/worksheet_<name>.index.md   작업 가이드
 """
 from __future__ import annotations
-import json, re, sys
+import json, re, subprocess, sys
 from pathlib import Path
 
 # 골드 강조 자동 후보 — 시트에는 '후보' 컬럼에만 제안으로 들어간다.
@@ -27,7 +27,7 @@ GOLD_CANDIDATES = [
     "DNA", "미래", "수도권", "지점", "플랫폼", "스마트스토어", "강의", "입주자",
 ]
 
-HEADER = ["구분", "번호", "시각", "위치", "현재문구",
+HEADER = ["구분", "번호", "시각(영상)", "위치", "현재문구",
           "컷", "수정문구", "강조",
           "컷후보", "강조후보", "비고",
           "(시스템)start", "(시스템)end"]
@@ -89,6 +89,42 @@ def window_at(wins: list, t: float):
     return None, None, None
 
 
+def rendered_offsets(edit: Path, edl: dict) -> list | None:
+    """실제 렌더된 영상의 세그먼트 시작 시각.
+
+    render.py 는 세그먼트마다 프레임 경계로 맞추느라 EDL 이론값보다 약 1프레임씩
+    길게 뽑는다. 41세그먼트가 쌓이면 끝에서 1.2초쯤 밀린다 — 시트 시각을 보고
+    영상에서 그 지점을 찾을 때 이 차이가 그대로 오차가 된다.
+    clips_graded/ 에 세그먼트 파일이 다 있으면 실측값으로 보정한다.
+    """
+    offs, off = [], 0.0
+    for i, r in enumerate(edl["ranges"]):
+        p = edit / "clips_graded" / f"seg_{i:02d}_{r['source']}.mp4"
+        if not p.exists():
+            return None
+        try:
+            d = float(subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(p)],
+                capture_output=True, text=True, check=True).stdout.strip())
+        except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
+            return None
+        offs.append((off, off + d))
+        off += d
+    return offs
+
+
+def to_rendered(wins: list, rend: list | None, t: float) -> float:
+    """EDL 타임라인의 t 를 실제 영상 시각으로."""
+    if rend is None:
+        return t
+    eps = 1e-6
+    for i, (s, e, _r) in enumerate(wins):
+        if s - eps <= t < e - eps:
+            return rend[i][0] + (t - s)
+    return t
+
+
 def card_text(card: dict) -> str:
     """cards.json 한 항목 -> 사람이 읽고 고칠 수 있는 한 줄."""
     p = card.get("props", {})
@@ -100,7 +136,9 @@ def card_text(card: dict) -> str:
 
 
 def mmss(sec: float) -> str:
-    return f"{int(sec // 60):02d}:{sec % 60:04.1f}"
+    # 0.1초로 먼저 반올림한 뒤 분을 가른다. 그러지 않으면 179.96초가 02:60.0 이 된다.
+    tenths = int(round(sec * 10))
+    return f"{tenths // 600:02d}:{tenths % 600 / 10:04.1f}"
 
 
 def gold_hint(text: str) -> str:
@@ -130,6 +168,7 @@ def build_rows(edit: Path, name: str) -> list:
     edl = json.loads((edit / f"edl_{name}.json").read_text(encoding="utf-8"))
     cues = parse_srt(edit / f"cues_{name}.srt")
     wins = out_windows(edl)
+    rend = rendered_offsets(edit, edl)
     cards_by_name = {}
     cards_path = edit / "cards.json"
     if cards_path.exists():
@@ -146,7 +185,8 @@ def build_rows(edit: Path, name: str) -> list:
         cname = src[len("card_"):] if src.startswith("card_") else src
         card = cards_by_name.get(cname, {})
         rows.append([
-            "카드", cname, mmss(s), "CARD", card_text(card) or r.get("quote", ""),
+            "카드", cname, mmss(to_rendered(wins, rend, s)), "CARD",
+            card_text(card) or r.get("quote", ""),
             "", "", "", "", "", f"길이 {e - s:.1f}s",
             f"{s:.3f}", f"{e:.3f}",
         ])
@@ -159,7 +199,7 @@ def build_rows(edit: Path, name: str) -> list:
         beat = r.get("beat", "?") if r is not None else "?"
         gap = (cues[i + 1][0] - t1) if i + 1 < len(cues) else 0.0
         rows.append([
-            "문장", str(i + 1), mmss(t0), beat, text,
+            "문장", str(i + 1), mmss(to_rendered(wins, rend, t0)), beat, text,
             "", "", "",
             "?" if 0.9 <= gap <= 3.0 else "",
             gold_hint(text),
