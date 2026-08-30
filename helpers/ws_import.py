@@ -97,6 +97,27 @@ def merge_cuts(segs: list) -> list:
     return [tuple(x) for x in out]
 
 
+def bridge_silent_gaps(cuts: list, items: list) -> list:
+    """컷과 컷 사이에 말이 하나도 없으면 그 사이도 함께 제거한다.
+
+    GAP_MIN(0.3초) 미만 무음은 시트에 행이 없어 지정할 방법이 자체가 없다.
+    연달아 어절을 자르면 그 틈들이 0.1초짜리 조각으로 살아남아 화면에서
+    깜빡인다 — 양옆을 다 자른 이상 그 사이 정적도 같이 가는 게 의도다.
+    """
+    if not cuts:
+        return []
+    words = [(w["out_start"], w["out_end"]) for w in items if w["kind"] == "어절"]
+    out = [list(cuts[0])]
+    for s, e in cuts[1:]:
+        prev_end = out[-1][1]
+        survives = any(ws < s and we > prev_end for ws, we in words)
+        if survives:
+            out.append([s, e])
+        else:
+            out[-1][1] = e
+    return [tuple(x) for x in out]
+
+
 def removed_before(cuts: list, t: float) -> float:
     acc = 0.0
     for s, e in cuts:
@@ -248,7 +269,7 @@ def main():
         else:
             raw.append((it["out_start"], it["out_end"]))
             n_word_cut += 1
-    cuts = merge_cuts(raw)
+    cuts = bridge_silent_gaps(merge_cuts(raw), items)
     cut_total = sum(e - s for s, e in cuts)
     print(f"  컷: 어절 {n_word_cut} + 무음 {n_gap_cut} + 카드 {n_card_cut} "
           f"-> 제거 구간 {len(cuts)}개, 총 {cut_total:.2f}s")
@@ -367,9 +388,13 @@ def main():
                 continue
             by_name[c["name"]] = apply_card_text(by_name[c["name"]], fix)
             changed.append(c["name"])
+            # durationSeconds 는 props 밖에 있지만 컴포지션이 길이를 이걸로 정한다.
+            # 빼고 렌더하면 기본값(3초)으로 나와 EDL 이 요구하는 길이에 못 미친다.
+            props = dict(by_name[c["name"]]["props"])
+            if "durationSeconds" in by_name[c["name"]]:
+                props["durationSeconds"] = by_name[c["name"]]["durationSeconds"]
             (edit / "cards" / f"{c['name']}.props.v2.json").write_text(
-                json.dumps(by_name[c["name"]]["props"], ensure_ascii=False, indent=1),
-                encoding="utf-8")
+                json.dumps(props, ensure_ascii=False, indent=1), encoding="utf-8")
         if changed:
             doc["cards"] = [by_name[c["name"]] for c in doc["cards"]]
             (edit / "cards_v2.json").write_text(
