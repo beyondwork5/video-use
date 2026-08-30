@@ -242,11 +242,21 @@ def main():
                 text = ""
             else:
                 text = fix
+        # 강조: ★ 면 어절 전체, 글자를 적으면 그 부분만.
+        # OM 의 goldSpan() 이 word.indexOf(gold) 로 부분문자열을 칠하므로
+        # "경쟁력이라고" 어절에 "경쟁력" 을 적으면 그 세 글자만 금색이 된다.
+        gold_txt = ""
+        if gold:
+            gold_txt = text if truthy(gold) else gold.strip()
+            if gold_txt and gold_txt not in text:
+                print(f"  ! 번호 {it['no']}: 강조 \"{gold_txt}\" 가 어절 "
+                      f"\"{text}\" 안에 없습니다 — 강조되지 않습니다")
+                gold_txt = ""
+            elif gold_txt:
+                n_gold += 1
         survivors.setdefault(it["cue"], []).append(
             {"t0": it["out_start"], "t1": it["out_end"], "text": text,
-             "gold": truthy(gold)})
-        if truthy(gold):
-            n_gold += 1
+             "gold": gold_txt})
 
     new_cues = []
     for ci in sorted(survivors):
@@ -260,7 +270,7 @@ def main():
             "start": ws[0]["t0"] - removed_before(cuts, ws[0]["t0"]),
             "end": ws[-1]["t1"] - removed_before(cuts, ws[-1]["t1"]),
             "text": text,
-            "gold": [w["text"] for w in ws if w["gold"] and w["text"]],
+            "gold": [w["gold"] for w in ws if w["gold"]],
         })
     new_cues.sort(key=lambda c: c["start"])
     for i in range(1, len(new_cues)):
