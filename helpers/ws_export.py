@@ -93,13 +93,19 @@ def build_timeline(edit: Path, name: str):
                              if w.get("type") == "word" and w.get("start") is not None]
         return tr_cache[src]
 
+    cards_json = {}
+    if (edit / "cards.json").exists():
+        for c in json.loads((edit / "cards.json").read_text(encoding="utf-8"))["cards"]:
+            cards_json[c["name"]] = c
+
     cards, items, off = [], [], 0.0
     for r in edl["ranges"]:
         seg = float(r["end"]) - float(r["start"])
         if is_card(r):
             src = str(r["source"])
-            cards.append({"name": src[len("card_"):] if src.startswith("card_") else src,
-                          "out_start": off, "out_end": off + seg})
+            nm = src[len("card_"):] if src.startswith("card_") else src
+            cards.append({"name": nm, "out_start": off, "out_end": off + seg,
+                          "text": card_text(cards_json.get(nm, {}))})
             off += seg
             continue
         s, e = float(r["start"]), float(r["end"])
@@ -201,15 +207,9 @@ def build_rows(edit: Path, name: str) -> list:
     rend = rendered_offsets(edit, edl)
     R = lambda t: mmss(to_rendered(edl, rend, t))
 
-    cards_by_name = {}
-    if (edit / "cards.json").exists():
-        for c in json.loads((edit / "cards.json").read_text(encoding="utf-8"))["cards"]:
-            cards_by_name[c["name"]] = c
-
     rows = [HEADER]
     for c in cards:
-        rows.append(["카드", c["name"], R(c["out_start"]), "",
-                     card_text(cards_by_name.get(c["name"], {})),
+        rows.append(["카드", c["name"], R(c["out_start"]), "", c["text"],
                      "", "", "", "", "", "",
                      f"길이 {c['out_end'] - c['out_start']:.1f}s",
                      f"{c['out_start']:.3f}", f"{c['out_end']:.3f}"])

@@ -45,8 +45,9 @@ def load_table(path_or_url: str) -> list:
 
 
 def find_cols(header: list) -> dict:
-    # 실제로 쓰는 건 이 5개뿐. 나머지 컬럼은 사람이 읽으라고 있는 것이라 없어도 된다.
-    want = {"kind": "구분", "no": "번호", "cut": "컷", "fix": "수정", "gold": "강조"}
+    # 어절(E)도 읽는다 — 사람은 수정 컬럼보다 그 자리에서 글자를 고치는 게 자연스럽다.
+    want = {"kind": "구분", "no": "번호", "word": "어절",
+            "cut": "컷", "fix": "수정", "gold": "강조"}
     idx = {h.strip(): i for i, h in enumerate(header)}
     missing = [v for v in want.values() if v not in idx]
     if missing:
@@ -188,11 +189,38 @@ def main():
     for r in rows[1:]:
         kind = r[cols["kind"]].strip()
         if kind in ("카드", "어절", "공백"):
-            marks[(kind, r[cols["no"]].strip())] = (
-                truthy(r[cols["cut"]]), r[cols["fix"]].strip(), r[cols["gold"]].strip())
-    blank = (False, "", "")
+            marks[(kind, r[cols["no"]].strip())] = {
+                "cut": truthy(r[cols["cut"]]),
+                "fix": r[cols["fix"]].strip(),
+                "sheet_word": r[cols["word"]].strip(),
+                "gold": r[cols["gold"]].strip()}
+    blank = {"cut": False, "fix": "", "sheet_word": "", "gold": ""}
 
     cards, items, cues, edl = build_timeline(edit, name)
+
+    # 어절 칸을 그 자리에서 고친 경우도 수정으로 받는다. 다만 시트 텍스트를 말없이
+    # 삼키면 왕복 중 깨진 글자가 자막에 박히므로, 바뀐 것은 전부 찍어서 보이게 한다.
+    inline = []
+    for it in items:
+        if it["kind"] != "어절":
+            continue
+        m = marks.get(("어절", str(it["no"])))
+        if not m or m["fix"] or not m["sheet_word"]:
+            continue
+        if m["sheet_word"] != it["text"]:
+            m["fix"] = m["sheet_word"]
+            inline.append((it["no"], it["text"], m["sheet_word"]))
+    for c in cards:
+        m = marks.get(("카드", c["name"]))
+        if m and not m["fix"] and m["sheet_word"] and m["sheet_word"] != c.get("text", ""):
+            m["fix"] = m["sheet_word"]
+            inline.append((c["name"], c.get("text", ""), m["sheet_word"]))
+    if inline:
+        print(f"  어절 칸에서 직접 고치신 것 {len(inline)}건 — 수정으로 반영합니다:")
+        for no, old, new in inline[:40]:
+            print(f"     {no}: \"{old}\" -> \"{new}\"")
+        if len(inline) > 40:
+            print(f"     ... 외 {len(inline) - 40}건")
     known = {("카드", c["name"]) for c in cards} | {(i["kind"], str(i["no"])) for i in items}
     unknown = set(marks) - known
     if unknown:
@@ -203,12 +231,11 @@ def main():
     # --- 컷 구간 ---
     raw, n_word_cut, n_gap_cut, n_card_cut = [], 0, 0, 0
     for c in cards:
-        if marks.get(("카드", c["name"]), blank)[0]:
+        if marks.get(("카드", c["name"]), blank)["cut"]:
             raw.append((c["out_start"], c["out_end"]))
             n_card_cut += 1
     for it in items:
-        cut, _fix, _gold = marks.get((it["kind"], str(it["no"])), blank)
-        if not cut:
+        if not marks.get((it["kind"], str(it["no"])), blank)["cut"]:
             continue
         if it["kind"] == "공백":
             # 세그먼트 경계에 붙은 쪽은 어차피 하드컷이라 여백을 남기지 않는다.
@@ -234,7 +261,8 @@ def main():
             continue
         if any(cs < it["out_end"] and ce > it["out_start"] for cs, ce in cuts):
             continue
-        cut, fix, gold = marks.get(("어절", str(it["no"])), blank)
+        m = marks.get(("어절", str(it["no"])), blank)
+        fix, gold = m["fix"], m["gold"]
         text = it["text"]
         if fix:
             n_fix += 1
@@ -334,7 +362,7 @@ def main():
         doc = json.loads((edit / "cards.json").read_text(encoding="utf-8"))
         by_name = {c["name"]: c for c in doc["cards"]}
         for c in cards:
-            fix = marks.get(("카드", c["name"]), blank)[1]
+            fix = marks.get(("카드", c["name"]), blank)["fix"]
             if not fix or c["name"] not in by_name:
                 continue
             by_name[c["name"]] = apply_card_text(by_name[c["name"]], fix)
