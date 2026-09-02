@@ -18,12 +18,12 @@ Usage:
     python helpers/ws_import.py c0017 [--input <file_or_url>]
 """
 from __future__ import annotations
-import csv, io, json, sys, urllib.request
+import csv, io, json, re, sys, urllib.request
 from pathlib import Path
 
 from ws_export import build_timeline, discover_edit, is_card
 
-MAX_LINE = 18          # 자막 한 줄 최대 글자수 (자막기준 v2)
+MAX_LINE = 24          # 자막 한 줄 최대 글자수 (밴드 실측 한계 28자)
 MIN_DUR = 0.8          # 자막 최소 표시 시간
 EDGE_PAD = 0.06        # 무음을 자를 때 앞뒤로 남기는 여유
 MIN_KEEP = 0.05        # 컷 후 남는 조각이 이보다 짧으면 반올림 찌꺼기로 보고 버린다
@@ -59,21 +59,70 @@ def truthy(v: str) -> bool:
     return v.strip().upper() in ("X", "O", "V", "★", "1", "Y", "TRUE")
 
 
+# 줄바꿈을 글자수만 보고 가운데에서 자르면 붙어야 할 말이 갈라진다.
+# 실제로 2줄 자막 67개 중 21개가 그랬다: "비욘드|워크만의", "할|수밖에",
+# "넘볼|수 없는", "이|시스템에". 아래는 그걸 막기 위한 한국어 규칙이다.
+DEP_NOUNS = {"수", "것", "때", "줄", "바", "뿐", "지", "거", "데", "점", "등",
+             "만큼", "대로", "채"}                      # 의존명사 — 앞말과 못 뗀다
+DETERMINERS = {"이", "그", "저", "한", "두", "세", "첫", "매", "전", "각",
+               "우리", "저희"}                          # 관형사 — 뒷말과 못 뗀다
+GLUE_PAIRS = [("비욘드", "워크"), ("비욘드", "캠퍼스"),
+              ("공유", "오피스"), ("공용", "오피스")]    # 전사가 띄어 쓴 고유명사
+# 검수하며 "여기는 붙여 달라"고 지목된 구절들. 규칙으로 못 잡는 의미 단위라
+# 목록으로 둔다 — 다음 영상에서도 같은 말이 나오면 그대로 적용된다.
+GLUE_PHRASES = [
+    "그러다 보니까", "첫 번째", "외부에서 오시는 분들은", "사진 강사로",
+    "자기의 커리어를", "핵심 지표 중에", "결혼하신 분도", "이 시스템에",
+    "어렵지 않게", "그 미래를", "넘볼 수 없는", "떠날 수 없는 공간이",
+    "변화돼 가면서", "생각하실 수도 있습니다",
+]
+CONJUNCTIONS = {"그래서", "그리고", "하지만", "그런데", "그러면",
+                "그러니까", "즉", "또", "또한", "따라서"}
+JOSA_END = ("은", "는", "이", "가", "을", "를", "에", "에서", "으로", "로",
+            "와", "과", "도", "만", "의", "께", "부터", "까지")
+
+
+def _break_score(toks: list, k: int, limit: int) -> float:
+    """toks 를 k 번째 앞에서 끊었을 때의 점수. 클수록 좋다."""
+    a, b = " ".join(toks[:k]), " ".join(toks[k:])
+    s = -abs(len(a) - len(b))                    # 두 줄 길이는 비슷할수록 좋다
+    # 한도 초과는 강하게 깎되 후보에서 제외하진 않는다 — 전부 초과하는 긴 큐도
+    # 어딘가에서는 끊어야 하고, 그때는 '덜 나쁜 곳'을 골라야 한다.
+    s -= (max(0, len(a) - limit) + max(0, len(b) - limit)) * 6
+    last, first = toks[k - 1], toks[k]
+    lc = re.sub(r"[^가-힣]", "", last)
+    fc = re.sub(r"[^가-힣]", "", first)
+    if fc in DEP_NOUNS:
+        s -= 40
+    if len(lc) <= 1:
+        s -= 25                                  # 윗줄이 한 글자로 끝나면 허전하다
+    if any(lc == x and fc.startswith(y) for x, y in GLUE_PAIRS):
+        s -= 60
+    for ph in GLUE_PHRASES:                      # 구절 한가운데는 자르지 않는다
+        p = ph.split()
+        for i in range(len(toks) - len(p) + 1):
+            if toks[i:i + len(p)] == p and i < k < i + len(p):
+                s -= 80
+    if lc in DETERMINERS:
+        s -= 35
+    if last.endswith(","):
+        s += 35                                  # 쉼표는 원래 쉬는 자리다
+    if last.endswith(JOSA_END):
+        s += 12
+    if first in CONJUNCTIONS:
+        s += 25
+    return s
+
+
 def wrap2(t: str) -> str:
-    """18자 기준 2줄로. 윗줄이 아랫줄보다 길지 않게 (방송 관례)."""
+    """MAX_LINE 기준 2줄로. 끊는 자리는 한국어 규칙으로 고른다."""
     if len(t) <= MAX_LINE:
         return t
-    mid = (len(t) + 1) // 2
-    spaces = [i for i, c in enumerate(t) if c == " "]
-    if not spaces:
+    toks = t.split()
+    if len(toks) < 2:
         return t
-    cut = min(spaces, key=lambda i: (abs(i - mid), 0 if i <= mid else 1))
-    l1, l2 = t[:cut].rstrip(), t[cut + 1:].lstrip()
-    if len(l2) < len(l1):
-        sp = [i for i, c in enumerate(l1) if c == " "]
-        if sp:
-            l1, l2 = l1[:sp[-1]].rstrip(), (l1[sp[-1] + 1:] + " " + l2).strip()
-    return l1 + "\n" + l2
+    k = max(range(1, len(toks)), key=lambda i: _break_score(toks, i, MAX_LINE))
+    return " ".join(toks[:k]) + "\n" + " ".join(toks[k:])
 
 
 def fmt_ts(sec: float) -> str:
