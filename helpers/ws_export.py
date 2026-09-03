@@ -202,7 +202,17 @@ def gold_hint(word: str) -> str:
     return "?" if any(k.replace(" ", "") in flat for k in GOLD_CANDIDATES) else ""
 
 
-def build_rows(edit: Path, name: str) -> list:
+FILLER = re.compile(r"[어음아에흐]+[.,!?]*")
+
+
+def build_rows(edit: Path, name: str, draft: bool = False) -> list:
+    """draft=True 면 되돌리기 쉬운 컷만 F열에 미리 표시해서 내보낸다.
+
+    표시일 뿐 EDL은 건드리지 않는다 — 사람이 X를 지우면 그 컷은 없던 일이 된다.
+    판단이 필요한 컷(어색한 말, 겹치는 내용, 화면상의 동작)은 손대지 않는다.
+    필러도 자르지 않는다 — 소리는 남기고 자막에서만 빼는 게 맞다는 게
+    260827 작업에서 나온 결론이다. 비고에 "필러"라고만 적어 둔다.
+    """
     cards, items, cues, edl = build_timeline(edit, name)
     rend = rendered_offsets(edit, edl)
     R = lambda t: mmss(to_rendered(edl, rend, t))
@@ -219,9 +229,11 @@ def build_rows(edit: Path, name: str) -> list:
     for it in items:
         dur = it["out_end"] - it["out_start"]
         if it["kind"] == "공백":
+            long_gap = dur >= GAP_CUT_HINT
             rows.append(["공백", str(it["no"]), R(it["out_start"]), "",
-                         f"⏸ 무음 {dur:.1f}초", "", "", "", "",
-                         "?" if dur >= GAP_CUT_HINT else "", "",
+                         f"⏸ 무음 {dur:.1f}초",
+                         "X" if (draft and long_gap) else "", "", "", "",
+                         "?" if long_gap else "", "",
                          "말이 없는 구간",
                          f"{it['out_start']:.3f}", f"{it['out_end']:.3f}"])
             continue
@@ -229,14 +241,15 @@ def build_rows(edit: Path, name: str) -> list:
         if it["cue"] and it["cue"] not in seen_cue:
             seen_cue.add(it["cue"])
             sent = cues[it["cue"] - 1][2]
-        memo = []
-        if re.fullmatch(r"[어음아에흐]+[.,!?]*", it["text"]):
+        memo, filler = [], bool(FILLER.fullmatch(it["text"]))
+        if filler:
             memo.append("필러")
         if "..." in it["text"] or "…" in it["text"]:
             memo.append("말줄임")
         rows.append(["어절", str(it["no"]), R(it["out_start"]),
                      str(it["cue"] or ""), it["text"],
-                     "", "", "", sent, "", gold_hint(it["text"]), "; ".join(memo),
+                     "", "", "",
+                     sent, "", gold_hint(it["text"]), "; ".join(memo),
                      f"{it['out_start']:.3f}", f"{it['out_end']:.3f}"])
     return rows
 
@@ -280,8 +293,9 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     name = args[0] if args else "c0017"
     footage = sys.argv[sys.argv.index("--footage") + 1] if "--footage" in sys.argv else None
+    draft = "--draft" in sys.argv
     edit = resolve_edit(footage)
-    rows = build_rows(edit, name)
+    rows = build_rows(edit, name, draft=draft)
     out = edit / f"worksheet_{name}.tsv"
     out.write_text("\n".join("\t".join(r) for r in rows), encoding="utf-8-sig")
     xlsx = edit / f"worksheet_{name}.xlsx"
@@ -289,6 +303,12 @@ def main():
         print(f"XLSX  {xlsx}")
     else:
         print("  (openpyxl 없음 — xlsx 건너뜀. pip install openpyxl)")
+
+    if draft:
+        pre = [r for r in rows[1:] if r[5] == "X"]
+        pre_s = sum(float(r[13]) - float(r[12]) for r in pre)
+        print(f"  1차컷 표시: 무음 {len(pre)}개 {pre_s:.1f}초")
+        print("  틀린 표시는 F열의 X를 지우면 없던 일이 됩니다.")
 
     n_card = sum(1 for r in rows[1:] if r[0] == "카드")
     n_word = sum(1 for r in rows[1:] if r[0] == "어절")
