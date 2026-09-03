@@ -35,23 +35,23 @@ HEADER = ["구분", "번호", "시각(영상)", "문장#", "어절",
           "(시스템)start", "(시스템)end"]
 
 
-def discover_edit() -> Path | None:
-    """F: 드라이브에서 260827_*/edit 를 발견."""
-    cands = []
-    for parent in Path("F:/").iterdir():
-        if not parent.is_dir():
-            continue
-        try:
-            children = list(parent.iterdir())
-        except (PermissionError, OSError):
-            continue
-        for d in children:
-            if d.is_dir() and d.name.startswith("260827") and (d / "edit").is_dir():
-                cands.append(d / "edit")
-    if not cands:
-        return None
-    cands.sort(key=lambda e: 0 if (e / "cards.json").exists() else 1)
-    return cands[0]
+def resolve_edit(footage: str | Path | None) -> Path:
+    """푸티지 폴더 -> 그 안의 edit/.
+
+    프로젝트마다 폴더가 다르므로 경로를 박아두지 않는다. 인자가 없을 때만
+    현재 폴더에서 찾는다(터미널에서 직접 부를 때의 편의).
+    """
+    if footage:
+        f = Path(footage).resolve()
+        e = f if f.name == "edit" else f / "edit"
+        if not e.is_dir():
+            raise SystemExit(f"edit 폴더가 없습니다: {e}")
+        return e
+    cwd = Path.cwd()
+    for c in (cwd if cwd.name == "edit" else cwd / "edit", cwd):
+        if (c / "transcripts").is_dir():
+            return c
+    raise SystemExit("푸티지 폴더를 --footage 로 지정하세요")
 
 
 def parse_srt(p: Path) -> list:
@@ -241,14 +241,54 @@ def build_rows(edit: Path, name: str) -> list:
     return rows
 
 
+def write_xlsx(rows: list, out: Path) -> bool:
+    """엑셀로도 뽑는다 — 더블클릭으로 열리고 구글시트가 그대로 가져간다.
+
+    openpyxl 이 없으면 건너뛴다. TSV 는 어차피 항상 나온다.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        return False
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "worksheet"
+    for r in rows:
+        ws.append(r)
+    for c in ws[1]:
+        c.fill = PatternFill("solid", fgColor="1E3932")
+        c.font = Font(bold=True, color="FFFFFF")
+    for col in ("F", "G", "H"):          # 사람이 만지는 칸만 금색으로
+        ws[f"{col}1"].fill = PatternFill("solid", fgColor="CBA258")
+        ws[f"{col}1"].font = Font(bold=True, color="1E3932")
+    widths = {"A": 6, "B": 7, "C": 11, "D": 6, "E": 22, "F": 5, "G": 16,
+              "H": 9, "I": 46, "J": 7, "K": 10, "L": 16, "M": 12, "N": 12}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+    for row in ws.iter_rows(min_row=2):
+        for c in row:
+            c.alignment = Alignment(vertical="center")
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(rows[0]))}{len(rows)}"
+    wb.save(out)
+    return True
+
+
 def main():
-    name = sys.argv[1] if len(sys.argv) > 1 else "c0017"
-    edit = discover_edit()
-    if edit is None:
-        raise SystemExit("cannot discover 260827_*/edit under F:/")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    name = args[0] if args else "c0017"
+    footage = sys.argv[sys.argv.index("--footage") + 1] if "--footage" in sys.argv else None
+    edit = resolve_edit(footage)
     rows = build_rows(edit, name)
     out = edit / f"worksheet_{name}.tsv"
     out.write_text("\n".join("\t".join(r) for r in rows), encoding="utf-8-sig")
+    xlsx = edit / f"worksheet_{name}.xlsx"
+    if write_xlsx(rows, xlsx):
+        print(f"XLSX  {xlsx}")
+    else:
+        print("  (openpyxl 없음 — xlsx 건너뜀. pip install openpyxl)")
 
     n_card = sum(1 for r in rows[1:] if r[0] == "카드")
     n_word = sum(1 for r in rows[1:] if r[0] == "어절")

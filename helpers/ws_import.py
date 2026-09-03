@@ -18,19 +18,33 @@ Usage:
     python helpers/ws_import.py c0017 [--input <file_or_url>]
 """
 from __future__ import annotations
-import csv, io, json, re, sys, urllib.request
+import csv, io, json, os, re, sys, urllib.request
 from pathlib import Path
 
-from ws_export import build_timeline, discover_edit, is_card
+from ws_export import build_timeline, resolve_edit, is_card
 
 MAX_LINE = 24          # 자막 한 줄 최대 글자수 (밴드 실측 한계 28자)
 MIN_DUR = 0.8          # 자막 최소 표시 시간
 EDGE_PAD = 0.06        # 무음을 자를 때 앞뒤로 남기는 여유
 MIN_KEEP = 0.05        # 컷 후 남는 조각이 이보다 짧으면 반올림 찌꺼기로 보고 버린다
-PUBLIC = Path(r"C:\Users\DHMoon\video-openmontage\remotion-composer\public")
+
+
+def om_public() -> Path:
+    """OM public/. 자막 원본의 유일한 위치 — Studio 미리보기와 최종 렌더가 같은 파일을 읽는다."""
+    for c in (os.environ.get("BW_OPENMONTAGE"), Path.home() / "video-openmontage"):
+        if c and (Path(c) / "remotion-composer" / "public").is_dir():
+            return Path(c) / "remotion-composer" / "public"
+    raise SystemExit("video-openmontage 를 찾지 못했습니다. BW_OPENMONTAGE 를 지정하세요.")
 
 
 def load_table(path_or_url: str) -> list:
+    if path_or_url.lower().endswith(".xlsx"):
+        from openpyxl import load_workbook
+        ws = load_workbook(path_or_url, data_only=True).active
+        rows = [["" if c is None else str(c).strip() for c in r]
+                for r in ws.iter_rows(values_only=True)]
+        width = max(len(r) for r in rows)
+        return [r + [""] * (width - len(r)) for r in rows]
     if path_or_url.startswith("http"):
         data = urllib.request.urlopen(path_or_url, timeout=60).read().decode("utf-8-sig")
     else:
@@ -248,9 +262,8 @@ def apply_card_text(card: dict, new_text: str) -> dict:
 def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "c0017"
     inpath = sys.argv[sys.argv.index("--input") + 1] if "--input" in sys.argv else None
-    edit = discover_edit()
-    if edit is None:
-        raise SystemExit("cannot discover 260827_*/edit under F:/")
+    footage = sys.argv[sys.argv.index("--footage") + 1] if "--footage" in sys.argv else None
+    edit = resolve_edit(footage)
 
     source = inpath or str(edit / f"worksheet_{name}.tsv")
     rows = load_table(source)
@@ -420,7 +433,8 @@ def main():
     too_long = [c["text"] for c in om_cues if len(c["text"]) > 28]
     if too_long:
         print(f"  ! 밴드 초과(28자) {len(too_long)}건: {too_long[:3]}")
-    om_path = PUBLIC / f"bw_260827_비욘드캠퍼스_{name}_cues.json"
+    # bw.py 의 cues_path() 와 같은 규약: bw_<푸티지폴더명>_cues.json
+    om_path = om_public() / f"bw_{edit.parent.name}_{name}_cues.json"
     om_path.write_text(json.dumps(
         {"cues": om_cues, "totalSeconds": total, "cardWindows": wins_card,
          "note": f"generated from worksheet {name}; cuts/fixes/gold by user"},
