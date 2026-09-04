@@ -390,6 +390,15 @@ def extract_all_segments(
                         speed=speed, target_w=width)
         seg_paths.append(out_path)
 
+    # Stamp the folder with the ranges we just extracted. Segment filenames carry
+    # only an index and a source name, so a leftover render of a *different* EDL
+    # can match by name and hand back the wrong durations to anything that
+    # measures these files. Consumers compare this list before trusting them.
+    (clips_dir / "_ranges.json").write_text(
+        json.dumps([{"source": r["source"], "start": r["start"], "end": r["end"]}
+                    for r in ranges], ensure_ascii=False),
+        encoding="utf-8")
+
     return seg_paths
 
 
