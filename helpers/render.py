@@ -125,6 +125,7 @@ def is_hdr_source(video: Path) -> bool:
              "-show_entries", "stream=color_transfer",
              "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
             capture_output=True, text=True, check=True,
+            encoding="utf-8", errors="replace",
         )
         return out.stdout.strip() in HDR_TRANSFERS
     except subprocess.CalledProcessError:
@@ -139,6 +140,7 @@ def is_portrait_source(video: Path) -> bool:
              "-show_entries", "stream=width,height",
              "-of", "csv=p=0", str(video)],
             capture_output=True, text=True, check=True,
+            encoding="utf-8", errors="replace",
         )
         w, h = map(int, out.stdout.strip().split(","))
         return h > w
