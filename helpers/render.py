@@ -242,14 +242,23 @@ def extract_segment(
     rate: str | None = None,
     speed: float = 1.0,
     target_w: int = 1920,
+    audio_filter: str = "",
+    crop: str = "",
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
+    `audio_filter` runs before the fades — a fixed capture chain (highpass, EQ,
+    gate, compressor) belongs here. Do NOT put `loudnorm` in it: these segments
+    are normalized independently, so a quiet one would be lifted to match a loud
+    one and the relative levels between segments would be destroyed. Loudness is
+    handled once, two-pass, on the finished cut.
+
     `-ss` before `-i` for fast accurate seeking. Scale to `target_w` (1080p by
     default; set `width` on the EDL to keep a 4K source at full size). Portrait
-    sources (height > width) are scaled by height to
-    preserve orientation. Draft mode always scales to 1280 regardless of
-    `target_w` — it's a fast cut-point check, not a resolution preview.
+    sources (height > width) are scaled by height to preserve orientation.
+    Draft mode always scales to 1280 regardless of `target_w` — it's a fast
+    cut-point check, not a resolution preview. `crop` is applied before the
+    scale.
 
     `speed` time-remaps the segment (1.1 = 10% faster) via setpts/atempo —
     pitch is preserved (atempo time-stretches, it doesn't resample). Output
@@ -272,6 +281,11 @@ def extract_segment(
     vf_parts: list[str] = []
     if is_hdr_source(source):
         vf_parts.append(TONEMAP_CHAIN)
+    # Crop before scale. Crop values are measured against the source's own
+    # resolution, so running them after the scale would reframe a different
+    # picture — a 4K-measured 3400x1912 crop does not even fit a 1920 frame.
+    if crop:
+        vf_parts.append(f"crop={crop}")
     vf_parts.append(scale)
     if grade_filter:
         vf_parts.append(grade_filter)
@@ -284,9 +298,11 @@ def extract_segment(
     out_duration = duration / speed if speed != 1.0 else duration
     fade_out_start = max(0.0, out_duration - 0.03)
     af_parts = []
+    if audio_filter:
+        af_parts.append(audio_filter)      # capture chain runs on the raw audio
     if speed != 1.0:
         af_parts.append(f"atempo={speed}")
-    af_parts.append(f"afade=t=in:st=0:d=0.03")
+    af_parts.append("afade=t=in:st=0:d=0.03")
     af_parts.append(f"afade=t=out:st={fade_out_start:.3f}:d=0.03")
     af = ",".join(af_parts)
 
@@ -347,6 +363,8 @@ def extract_all_segments(
 
     ranges = edl["ranges"]
     sources = edl["sources"]
+    edl_audio = edl.get("audio", "")
+    edl_crop = edl.get("crop", "")
 
     # Resolve ONE output frame rate for the entire render and apply it to every
     # segment. The lossless concat (Rule 2, `-c copy`) requires all segments to
@@ -374,20 +392,28 @@ def extract_all_segments(
         duration = end - start
         out_path = clips_dir / f"seg_{i:02d}_{src_name}.mp4"
 
-        if is_auto:
+        # A range may override the EDL-wide grade. Sources shot in one session can
+        # still drift in white balance (camera restart), so a per-range correction
+        # is the only place that difference can be expressed.
+        if "grade" in r:
+            seg_filter = resolve_grade_filter(r["grade"])
+        elif is_auto:
             seg_filter, _stats = auto_grade_for_clip(src_path, start=start, duration=duration, verbose=False)
         else:
             seg_filter = resolved
+        seg_audio = r.get("audio", edl_audio)
+        seg_crop = r.get("crop", edl_crop)
 
         speed = float(r.get("speed", 1.0))
         note = r.get("beat") or r.get("note") or ""
         speed_note = f"  x{speed}" if speed != 1.0 else ""
         print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}{speed_note}")
-        if is_auto:
+        if is_auto or "grade" in r:
             print(f"        grade: {seg_filter or '(none)'}")
         extract_segment(src_path, start, duration, seg_filter, out_path,
                         preview=preview, draft=draft, rate=out_rate,
-                        speed=speed, target_w=width)
+                        speed=speed, target_w=width,
+                        audio_filter=seg_audio, crop=seg_crop)
         seg_paths.append(out_path)
 
     # Stamp the folder with the ranges we just extracted. Segment filenames carry
