@@ -158,15 +158,25 @@ def extract_segment(
     preview: bool = False,
     draft: bool = False,
     fps: str = "24",
+    speed: float = 1.0,
+    target_w: int = 3840,
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
-    `-ss` before `-i` for fast accurate seeking. Scale to 1080p from 4K.
-    Portrait sources (height > width) are scaled by height to preserve orientation.
+    `-ss` before `-i` for fast accurate seeking. Scale to `target_w` (4K by
+    default; pass 1920 to downscale instead of outputting native 4K). Portrait
+    sources (height > width) are scaled by height to
+    preserve orientation. Draft mode always scales to 1280 regardless of
+    `target_w` — it's a fast cut-point check, not a resolution preview.
+
+    `speed` time-remaps the segment (1.1 = 10% faster) via setpts/atempo —
+    pitch is preserved (atempo time-stretches, it doesn't resample). Output
+    duration becomes `duration / speed`; the audio fades below are timed
+    against that post-atempo length, not the source `duration`.
 
     Quality ladder:
-      - final (default): 1080p libx264 fast CRF 20
-      - preview:         1080p libx264 medium CRF 22 (evaluable for QC)
+      - final (default): target_w libx264 fast CRF 20
+      - preview:         target_w libx264 medium CRF 22 (evaluable for QC)
       - draft:           720p libx264 ultrafast CRF 28 (cut-point check only)
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,7 +185,7 @@ def extract_segment(
     if draft:
         scale = "scale=-2:1280" if portrait else "scale=1280:-2"
     else:
-        scale = "scale=-2:1920" if portrait else "scale=1920:-2"
+        scale = f"scale=-2:{target_w}" if portrait else f"scale={target_w}:-2"
 
     vf_parts: list[str] = []
     if is_hdr_source(source):
@@ -183,11 +193,20 @@ def extract_segment(
     vf_parts.append(scale)
     if grade_filter:
         vf_parts.append(grade_filter)
+    if speed != 1.0:
+        vf_parts.append(f"setpts=PTS/{speed}")
     vf = ",".join(vf_parts)
 
-    # 30ms audio fades at both edges (Rule 3) — prevent pops
-    fade_out_start = max(0.0, duration - 0.03)
-    af = f"afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out_start:.3f}:d=0.03"
+    # 30ms audio fades at both edges (Rule 3) — prevent pops. Computed against
+    # the post-speed output length so they still land at the true out-point.
+    out_duration = duration / speed if speed != 1.0 else duration
+    fade_out_start = max(0.0, out_duration - 0.03)
+    af_parts = []
+    if speed != 1.0:
+        af_parts.append(f"atempo={speed}")
+    af_parts.append(f"afade=t=in:st=0:d=0.03")
+    af_parts.append(f"afade=t=out:st={fade_out_start:.3f}:d=0.03")
+    af = ",".join(af_parts)
 
     if draft:
         preset, crf = "ultrafast", "28"
@@ -199,8 +218,8 @@ def extract_segment(
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{seg_start:.3f}",
-        "-i", str(source),
         "-t", f"{duration:.3f}",
+        "-i", str(source),
         "-vf", vf,
         "-af", af,
         "-c:v", "libx264", "-preset", preset, "-crf", crf,
@@ -227,8 +246,13 @@ def extract_all_segments(
     """
     resolved = resolve_grade_filter(edl.get("grade"))
     is_auto = resolved == "__AUTO__"
-    # Optional EDL field; omit it to keep the 24fps default.
+    # Optional EDL fields; omit either to keep the 24fps / 4K default.
     fps = str(edl.get("fps", "24"))
+    # --preview is documented as 1080p regardless of the EDL's real target —
+    # it's for fast QC, not a resolution preview. Draft's 1280 override lives
+    # in extract_segment() itself; mirror that here so preview doesn't
+    # silently inherit a 4K target and stop being fast.
+    width = 1920 if preview else int(edl.get("width", 3840))
     clips_dir = edit_dir / (
         "clips_draft" if draft else ("clips_preview" if preview else "clips_graded")
     )
@@ -254,11 +278,13 @@ def extract_all_segments(
         else:
             seg_filter = resolved
 
+        speed = float(r.get("speed", 1.0))
         note = r.get("beat") or r.get("note") or ""
-        print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}")
+        speed_note = f"  x{speed}" if speed != 1.0 else ""
+        print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}{speed_note}")
         if is_auto:
             print(f"        grade: {seg_filter or '(none)'}")
-        extract_segment(src_path, start, duration, seg_filter, out_path, preview=preview, draft=draft, fps=fps)
+        extract_segment(src_path, start, duration, seg_filter, out_path, preview=preview, draft=draft, fps=fps, speed=speed, target_w=width)
         seg_paths.append(out_path)
 
     return seg_paths
