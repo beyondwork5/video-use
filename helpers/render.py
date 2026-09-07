@@ -158,8 +158,16 @@ def extract_segment(
     preview: bool = False,
     draft: bool = False,
     fps: str = "24",
+    audio_filter: str = "",
+    crop: str = "",
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
+
+    `audio_filter` runs before the fades — a fixed capture chain (highpass, EQ,
+    gate, compressor) belongs here. Do NOT put `loudnorm` in it: these segments
+    are normalized independently, so a quiet one would be lifted to match a loud
+    one and the relative levels between segments would be destroyed. Loudness is
+    handled once, two-pass, on the finished cut.
 
     `-ss` before `-i` for fast accurate seeking. Scale to 1080p from 4K.
     Portrait sources (height > width) are scaled by height to preserve orientation.
@@ -180,6 +188,11 @@ def extract_segment(
     vf_parts: list[str] = []
     if is_hdr_source(source):
         vf_parts.append(TONEMAP_CHAIN)
+    # Crop before scale. Crop values are measured against the source's own
+    # resolution, so running them after the scale would reframe a different
+    # picture — a 4K-measured 3400x1912 crop does not even fit a 1920 frame.
+    if crop:
+        vf_parts.append(f"crop={crop}")
     vf_parts.append(scale)
     if grade_filter:
         vf_parts.append(grade_filter)
@@ -188,6 +201,8 @@ def extract_segment(
     # 30ms audio fades at both edges (Rule 3) — prevent pops
     fade_out_start = max(0.0, duration - 0.03)
     af = f"afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out_start:.3f}:d=0.03"
+    if audio_filter:
+        af = f"{audio_filter},{af}"
 
     if draft:
         preset, crf = "ultrafast", "28"
@@ -236,6 +251,8 @@ def extract_all_segments(
 
     ranges = edl["ranges"]
     sources = edl["sources"]
+    edl_audio = edl.get("audio", "")
+    edl_crop = edl.get("crop", "")
 
     seg_paths: list[Path] = []
     print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/")
@@ -249,16 +266,25 @@ def extract_all_segments(
         duration = end - start
         out_path = clips_dir / f"seg_{i:02d}_{src_name}.mp4"
 
-        if is_auto:
+        # A range may override the EDL-wide grade. Sources shot in one session can
+        # still drift in white balance (camera restart), so a per-range correction
+        # is the only place that difference can be expressed.
+        if "grade" in r:
+            seg_filter = resolve_grade_filter(r["grade"])
+        elif is_auto:
             seg_filter, _stats = auto_grade_for_clip(src_path, start=start, duration=duration, verbose=False)
         else:
             seg_filter = resolved
+        seg_audio = r.get("audio", edl_audio)
+        seg_crop = r.get("crop", edl_crop)
 
         note = r.get("beat") or r.get("note") or ""
         print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}")
-        if is_auto:
+        if is_auto or "grade" in r:
             print(f"        grade: {seg_filter or '(none)'}")
-        extract_segment(src_path, start, duration, seg_filter, out_path, preview=preview, draft=draft, fps=fps)
+        extract_segment(src_path, start, duration, seg_filter, out_path,
+                        preview=preview, draft=draft, fps=fps,
+                        audio_filter=seg_audio, crop=seg_crop)
         seg_paths.append(out_path)
 
     # Stamp the folder with the ranges we just extracted. Segment filenames carry
