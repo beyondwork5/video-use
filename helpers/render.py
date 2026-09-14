@@ -335,7 +335,13 @@ def extract_all_segments(
 def concat_segments(segment_paths: list[Path], out_path: Path, edit_dir: Path) -> None:
     """Lossless concat via the concat demuxer. No re-encode."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    concat_list = edit_dir / "_concat.txt"
+    # Name the list after the output, not a fixed `_concat.txt`. Two renders of
+    # the same project overlap in practice — a preview while a final is still
+    # running, a caption pass beside a base pass — and with one shared name the
+    # second render overwrites the first's list mid-read, so the first concats
+    # the wrong segments or dies on a half-written file. Outputs already have to
+    # be distinct, so keying on the output name makes the collision impossible.
+    concat_list = edit_dir / f"_concat_{out_path.stem}.txt"
     concat_list.write_text(
         "".join(f"file '{p.resolve()}'\n" for p in segment_paths), encoding="utf-8"
     )
