@@ -97,19 +97,40 @@ def _sample_frame_stats(
     # Sample fps = n_samples / duration, clamped so we don't over-sample short clips
     fps = max(0.5, min(n_samples / max(duration, 0.1), 10.0))
 
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as f:
-        metadata_path = f.name
-
-    try:
+    # `file=` is a **filter argument**, so ffmpeg's parser eats ':' as an option
+    # separator and '\' as an escape. Handing it a Windows absolute path
+    # (`C:\Users\...\tmp123.txt`) therefore corrupts the filter string, and auto
+    # grade fails 100% of the time on that platform — which is exactly what
+    # happened: `grade: "auto"` never once worked on Windows.
+    #
+    # Rather than escape the path (two parsing levels, easy to get subtly wrong),
+    # run ffmpeg *inside* a temp directory and pass only the **file name**. No
+    # colon, no backslash, nothing platform-specific reaches the parser.
+    with tempfile.TemporaryDirectory() as tmp:
+        metadata_path = Path(tmp) / "signalstats.txt"
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-nostats",
             "-ss", f"{start:.3f}",
-            "-i", str(video),
+            # cwd is the temp dir now, so a relative input path would no longer
+            # resolve. Absolute it here.
+            "-i", str(Path(video).resolve()),
             "-t", f"{duration:.3f}",
-            "-vf", f"fps={fps:.2f},signalstats,metadata=print:file={metadata_path}",
+            "-vf", f"fps={fps:.2f},signalstats,metadata=print:file={metadata_path.name}",
             "-f", "null", "-",
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.run(
+            cmd, cwd=tmp,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        if proc.returncode != 0:
+            # Previously stderr went to DEVNULL, so the failure above surfaced as
+            # a bare CalledProcessError with no hint of what ffmpeg objected to.
+            # Carry the message — that silence is why the bug survived so long.
+            raise RuntimeError(
+                f"signalstats analysis failed (ffmpeg exit {proc.returncode})\n"
+                + (proc.stderr or "").strip()[-2000:]
+            )
 
         # Parse signalstats metadata. Signalstats reports values in the NATIVE
         # bit depth of the decoded frame (8-bit → 0-255, 10-bit → 0-1023). We
@@ -127,7 +148,9 @@ def _sample_frame_stats(
             except (ValueError, IndexError):
                 return None
 
-        with open(metadata_path) as f:
+        # Values are ASCII, but an unspecified encoding opens as cp949 on Korean
+        # Windows — the same trap as e4d5fc6. Pin it.
+        with open(metadata_path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if "lavfi.signalstats.YBITDEPTH" in line:
@@ -171,8 +194,6 @@ def _sample_frame_stats(
             "y_std": y_range / 4.0,  # range ÷ 4 ≈ stddev for normal-ish distributions
             "sat_mean": sat_mean,
         }
-    finally:
-        Path(metadata_path).unlink(missing_ok=True)
 
 
 def auto_grade_for_clip(
