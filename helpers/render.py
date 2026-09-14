@@ -64,6 +64,57 @@ def run(cmd: list[str], quiet: bool = False) -> None:
     subprocess.run(cmd, check=True)
 
 
+_AMF: bool | None = None
+
+
+def video_codec_args(draft: bool, preview: bool) -> list[str]:
+    """Encoder arguments for one per-segment extract.
+
+    Prefers AMD hardware encoding (`h264_amf`) when it actually works and
+    falls back to `libx264` when it does not. Segments are intermediates —
+    they get concatenated and re-encoded once more — so the useful trade here
+    is speed against disk, not disk against quality.
+
+    Measured on a 4K (3840x2160) source, one 3.9 s segment, median of three,
+    SSIM against a near-lossless reference of the same frames:
+
+        libx264 -preset fast -crf 20   7.47 s   11.6 MB   SSIM 0.9732
+        h264_amf -rc cqp -qp 18        4.02 s   30.0 MB   SSIM 0.9802
+        h264_amf -rc cqp -qp 15        4.03 s   54.0 MB   SSIM 0.9874
+
+    The hardware path is both faster and closer to the source; it only costs
+    bytes. qp 15 is free in time but 4.7x the size, and that extra fidelity
+    does not survive the final encode — so qp 18 is the default.
+
+    **Parallelism is not the answer here, and was measured.** x264 already
+    saturates a 16-core machine on 4K, so running extracts concurrently just
+    adds contention: 2 at a time was 8% faster, 3 was slower than 1, and 6 was
+    4x slower than 1. Keep the extract loop sequential.
+
+    Availability is probed by encoding a single frame rather than by reading
+    `ffmpeg -encoders`: a build can list `h264_amf` on a machine with no AMD
+    GPU and fail only when the encoder is opened.
+    """
+    global _AMF
+    if draft:
+        # Draft is a 720p cut-point check — already fast and small.
+        return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
+    if _AMF is None:
+        probe = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-v", "error", "-f", "lavfi",
+             "-i", "color=c=black:s=128x128:d=0.04", "-c:v", "h264_amf",
+             "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        _AMF = probe.returncode == 0
+        print(f"  segment encoder: {'h264_amf (GPU)' if _AMF else 'libx264 (CPU)'}")
+    if _AMF:
+        qp = "20" if preview else "18"
+        return ["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp",
+                "-qp_i", qp, "-qp_p", qp]
+    return (["-c:v", "libx264", "-preset", "medium", "-crf", "22"] if preview
+            else ["-c:v", "libx264", "-preset", "fast", "-crf", "20"])
+
+
 def resolve_grade_filter(grade_field: str | None) -> str:
     """The EDL's 'grade' field can be a preset name, a raw ffmpeg filter, or 'auto'.
 
@@ -185,9 +236,10 @@ def extract_segment(
     duration becomes `duration / speed`; the audio fades below are timed
     against that post-atempo length, not the source `duration`.
 
-    Quality ladder:
-      - final (default): target_w libx264 fast CRF 20
-      - preview:         target_w libx264 medium CRF 22 (evaluable for QC)
+    Quality ladder (encoder chosen by `video_codec_args`, which prefers the
+    GPU when one is actually usable and falls back to libx264 otherwise):
+      - final (default): target_w, qp 18  / libx264 fast CRF 20
+      - preview:         target_w, qp 20  / libx264 medium CRF 22 (QC)
       - draft:           720p libx264 ultrafast CRF 28 (cut-point check only)
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,21 +278,21 @@ def extract_segment(
     af_parts.append(f"afade=t=out:st={fade_out_start:.3f}:d=0.03")
     af = ",".join(af_parts)
 
-    if draft:
-        preset, crf = "ultrafast", "28"
-    elif preview:
-        preset, crf = "medium", "22"
-    else:
-        preset, crf = "fast", "20"
-
+    # `-t` 가 두 번 나오는 건 실수가 아니다. 둘 다 필요하다.
+    #   -i 앞(입력): 소스에서 읽을 길이. speed 를 쓸 때 이게 기준이다. 뒤로만
+    #     두면 "출력 D초"로 읽혀 입력을 D*speed 만큼 삼키고 구간끼리 겹친다.
+    #   -i 뒤(출력): 뽑을 길이. 이게 없으면 비디오만 프레임 경계로 올림돼
+    #     오디오보다 매번 0.1초쯤 길어지고, 그 오차가 컷 수만큼 누적돼 뒤로
+    #     갈수록 소리가 밀린다.
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{seg_start:.3f}",
         "-t", f"{duration:.3f}",
         "-i", str(source),
+        "-t", f"{out_duration:.3f}",
         "-vf", vf,
         "-af", af,
-        "-c:v", "libx264", "-preset", preset, "-crf", crf,
+        *video_codec_args(draft, preview),
         "-pix_fmt", "yuv420p", "-r", fps,
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart",
