@@ -1,0 +1,17 @@
+# video-use 가 실제로 import 하는 것만 적는다. 전이 의존성은 pip 가 끌어온다
+# (librosa 하나가 numba·scipy·soundfile·scikit-learn 등 열 개를 데려온다).
+#
+#   python -m pip install -r requirements.txt
+#
+# 버전은 2026-09-21 메인 PC 의 .venv 에서 실제로 돌아가는 값이다.
+# **하한은 실측하지 않았다** — 더 낮은 버전에서도 돌 수 있다. 낮춰서 확인했으면
+# 그 값으로 고칠 것. 상한은 두지 않는다.
+#
+# 이 파일은 그 .venv 를 pip freeze 해서 만들었다. 가상환경은 기기마다 새로
+# 만드는 것이라 git 에도 OneDrive 에도 올리지 않는다(.gitignore 의 .venv/).
+
+Pillow>=12.3          # 자막·오버레이 렌더 (helpers/render.py)
+numpy>=2.5            # 프레임 버퍼
+requests>=2.34        # 전사 API 호출
+librosa>=1.0          # helpers/timeline_view.py — 파형·무음 분석
+matplotlib>=3.11      # helpers/timeline_view.py — 타임라인 그림
